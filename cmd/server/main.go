@@ -9,10 +9,15 @@ import (
 	"net"
 	"net/http"
 	"strings"
+	"time"
 )
 
 func generateID() string {
 	return fmt.Sprintf("%v", rand.Uint32()%100000)
+}
+
+func getURL(listen_http_str string, id string) string {
+	return fmt.Sprintf("http://%v/%v/file.bin", listen_http_str, id)
 }
 
 type Message struct {
@@ -21,13 +26,38 @@ type Message struct {
 }
 
 func transferServer(c net.Conn, listener chan io.Writer, url string) {
-	fmt.Println("Serving", url, "- waiting for a connection")
+	log.Println("Serving", url, "- waiting for a connection")
 	_, err := c.Write([]byte(url + "\n"))
 	if err != nil {
 		panic("Write error: " + err.Error())
 	}
 
-	receiver := <-listener
+	ticker := time.NewTicker(30 * time.Second)
+
+	var receiver io.Writer = nil
+
+	for receiver == nil {
+		select {
+		case receiver = <-listener:
+			break
+		case <-ticker.C:
+			log.Println("Waiting...")
+
+			_, err := c.Write([]byte("Waiting\n"))
+			if err != nil {
+				log.Println("Error while writing", err.Error())
+				return
+			}
+		}
+	}
+	ticker.Stop()
+	log.Println("Starting transfer")
+
+	_, err = c.Write([]byte("Starting transfer\n"))
+	if err != nil {
+		log.Println("Error while writing", err.Error())
+		return
+	}
 
 	buffer := make([]byte, 4096)
 
@@ -115,7 +145,7 @@ func main() {
 		channel := make(chan io.Writer)
 		id := generateID()
 		mapping.Add(id, channel)
-		url := fmt.Sprintf("http://%v/%v/file.bin", *listen_http_str, id)
+		url := getURL(*listen_http_str, id)
 		go transferServer(fd, channel, url)
 	}
 }
