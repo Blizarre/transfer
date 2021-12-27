@@ -20,19 +20,36 @@ func getURL(listen_http_str string, id string) string {
 	return fmt.Sprintf("http://%v/%v/file.bin", listen_http_str, id)
 }
 
-type Message struct {
-	data []byte
-	err  error
-}
-
-func transferServer(c net.Conn, listener chan io.Writer, url string) {
-	log.Println("Serving", url, "- waiting for a connection")
-	_, err := c.Write([]byte(url + "\n"))
-	if err != nil {
-		panic("Write error: " + err.Error())
+func transferServer(c net.Conn, listener chan io.Writer, id string, listen_http_str string) {
+	messageToSender := func(message string) error {
+		log.Println(id, "to Sender:", message)
+		_, err := c.Write([]byte(message + "\n"))
+		if err != nil {
+			log.Println("Write error to sender", err.Error())
+		}
+		return err
 	}
 
-	ticker := time.NewTicker(30 * time.Second)
+	defer func() {
+		// Errors will be logged. There is nothing else to do
+		messageToSender("Closing")
+
+		err := c.Close()
+		if err != nil {
+			log.Println(id, "error closing", err)
+		}
+		listener <- nil
+	}()
+
+	url := getURL(listen_http_str, id)
+	if messageToSender(url) != nil {
+		return
+	}
+
+	log.Println(id, "Serving", url, "- waiting for a connection")
+
+	ticker_30s := time.NewTicker(30 * time.Second)
+	ticker_90m := time.NewTicker(90 * time.Minute)
 
 	var receiver io.Writer = nil
 
@@ -40,22 +57,24 @@ func transferServer(c net.Conn, listener chan io.Writer, url string) {
 		select {
 		case receiver = <-listener:
 			break
-		case <-ticker.C:
-			log.Println("Waiting...")
-
-			_, err := c.Write([]byte("Waiting\n"))
-			if err != nil {
-				log.Println("Error while writing", err.Error())
+		case <-ticker_30s.C:
+			if messageToSender("Waiting") != nil {
 				return
 			}
+		case <-ticker_90m.C:
+			messageToSender("No receiver found, Stopping")
+			return
 		}
 	}
-	ticker.Stop()
-	log.Println("Starting transfer")
+	if receiver == nil {
+		messageToSender("Error on the receiver side")
+		return
+	}
 
-	_, err = c.Write([]byte("Starting transfer\n"))
-	if err != nil {
-		log.Println("Error while writing", err.Error())
+	ticker_30s.Stop()
+	ticker_90m.Stop()
+
+	if messageToSender("Starting transfer") != nil {
 		return
 	}
 
@@ -64,45 +83,49 @@ func transferServer(c net.Conn, listener chan io.Writer, url string) {
 	for {
 		nr, errRead := c.Read(buffer)
 		if errRead != nil && errRead != io.EOF {
-			log.Println("Error while reading", errRead.Error())
+			// Errors will be logged. There is nothing else to do
+			messageToSender("Error reading data from the sender")
+			log.Println(id, "Error while reading data", errRead.Error())
 			return
 		}
-		log.Println("Read", nr)
+		log.Println(id, "Read", nr)
 
-		_, err = receiver.Write(buffer[:nr])
+		_, err := receiver.Write(buffer[:nr])
 		if err != nil {
-			log.Println("Error while Writing:", err.Error())
+			// Errors will be logged. There is nothing else to do
+			messageToSender("Error writing data to the receiver")
+			log.Println(id, "Error while Writing data", err.Error())
 			return
 		}
 
 		if errRead == io.EOF {
-			log.Println("End of", url)
-			listener <- nil
+			log.Println(id, "Transfer Successful")
 			return
 		}
 	}
 
 }
 
-func serveFile(mapping *SafeMap, w FlushWriter, path string) {
+func sendData(mapping *SafeMap, w FlushWriter, path string) {
 	log.Println("Serving", path)
 	splits := strings.Split(path, "/")
 	if len(splits) != 3 {
 		log.Println("Error: Invalid path", path)
-		return
-	}
-	id := splits[1]
-
-	conn, ok := mapping.Read(id)
-	if !ok {
 		w.w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("File not found"))
 		return
 	}
+	id := splits[1]
 
-	w.w.WriteHeader(http.StatusAccepted)
-	conn <- w
-	<-conn
+	conn, ok := mapping.Pop(id)
+	if !ok {
+		w.w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte("File not found"))
+	} else {
+		w.w.WriteHeader(http.StatusAccepted)
+		conn <- w
+		<-conn
+	}
 }
 
 func main() {
@@ -115,7 +138,8 @@ func main() {
 	http.HandleFunc("/", func(writer http.ResponseWriter, r *http.Request) {
 		flusher, ok := writer.(http.Flusher)
 		if !ok {
-			log.Println("Error, un-chunkable")
+			log.Panicln("Error, un-chunkable")
+			return
 		}
 
 		w := FlushWriter{
@@ -123,11 +147,8 @@ func main() {
 			w: writer,
 		}
 
-		serveFile(&mapping, w, r.URL.Path)
+		sendData(&mapping, w, r.URL.Path)
 	})
-
-	go http.ListenAndServe(*listen_http_str, nil)
-	log.Println("Sender server started, listening to", *listen_http_str)
 
 	l, err := net.Listen("tcp4", *listen_str)
 	if err != nil {
@@ -135,6 +156,12 @@ func main() {
 		return
 	}
 	log.Println("Receiver server started, listening to", *listen_str)
+
+	go func() {
+		log.Println("Sender server started, listening to", *listen_http_str)
+		err := http.ListenAndServe(*listen_http_str, nil)
+		log.Fatal("Error during http listening", err)
+	}()
 
 	for {
 		fd, err := l.Accept()
@@ -145,7 +172,6 @@ func main() {
 		channel := make(chan io.Writer)
 		id := generateID()
 		mapping.Add(id, channel)
-		url := getURL(*listen_http_str, id)
-		go transferServer(fd, channel, url)
+		go transferServer(fd, channel, id, *listen_http_str)
 	}
 }
