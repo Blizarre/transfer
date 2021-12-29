@@ -6,6 +6,7 @@ import (
 	"io"
 	"log"
 	"math/rand"
+	"mime"
 	"net"
 	"net/http"
 	"strings"
@@ -17,7 +18,7 @@ func generateID() string {
 }
 
 func getURL(listen_http_str string, id string) string {
-	return fmt.Sprintf("http://%v/%v/file.bin", listen_http_str, id)
+	return fmt.Sprintf("http://%v/%v/file", listen_http_str, id)
 }
 
 func transferServer(c net.Conn, listener chan io.Writer, id string, listen_http_str string) {
@@ -106,6 +107,18 @@ func transferServer(c net.Conn, listener chan io.Writer, id string, listen_http_
 
 }
 
+func getMimeType(path string) string {
+	splits := strings.Split(path, ".")
+	extension := splits[len(splits)-1]
+	mime_type := mime.TypeByExtension("." + extension)
+	log.Println("Mime for", extension, "is", mime_type)
+	if mime_type == "" {
+		return "application/octet-stream"
+	} else {
+		return mime_type
+	}
+}
+
 func sendData(mapping *SafeMap, w FlushWriter, path string) {
 	log.Println("Serving", path)
 	splits := strings.Split(path, "/")
@@ -122,6 +135,7 @@ func sendData(mapping *SafeMap, w FlushWriter, path string) {
 		w.w.WriteHeader(http.StatusNotFound)
 		w.Write([]byte("File not found"))
 	} else {
+		w.w.Header().Add("Content-type", getMimeType(path))
 		w.w.WriteHeader(http.StatusAccepted)
 		conn <- w
 		<-conn
