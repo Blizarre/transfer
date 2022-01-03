@@ -143,8 +143,9 @@ func sendData(mapping *SafeMap, w FlushWriter, path string) {
 }
 
 func main() {
-	listen_str := flag.String("host-receiver", "localhost:1234", "Definition for the receiver")
-	listen_http_str := flag.String("host-sender", "localhost:8080", "Definition for the host")
+	listen_tcp := flag.String("listen-tcp", "localhost:1234", "Listen string for the TCP socket")
+	listen_http := flag.String("listen-http", "localhost:8080", "Listen string for the HTTP server")
+	http_prefix := flag.String("http-prefix", "localhost:8080", "Prefix for the http(s) urls")
 	flag.Parse()
 
 	mapping := NewSafeMap()
@@ -164,16 +165,16 @@ func main() {
 		sendData(&mapping, w, r.URL.Path)
 	})
 
-	l, err := net.Listen("tcp4", *listen_str)
+	l, err := net.Listen("tcp4", *listen_tcp)
 	if err != nil {
 		log.Println("listen error", err.Error())
 		return
 	}
-	log.Println("Receiver server started, listening to", *listen_str)
+	log.Println("TCP Receiver server started at", *listen_tcp)
 
 	go func() {
-		log.Println("Sender server started, listening to", *listen_http_str)
-		err := http.ListenAndServe(*listen_http_str, nil)
+		log.Println("HTTP(s) server started at", *listen_http)
+		err := http.ListenAndServe(*listen_http, nil)
 		log.Fatal("Error during http listening", err)
 	}()
 
@@ -186,6 +187,6 @@ func main() {
 		channel := make(chan io.Writer)
 		id := generateID()
 		mapping.Add(id, channel)
-		go transferServer(fd, channel, id, *listen_http_str)
+		go transferServer(fd, channel, id, *http_prefix)
 	}
 }
