@@ -21,25 +21,49 @@ func getURL(listen_http_str string, id string) string {
 	return fmt.Sprintf("http://%v/%v/file", listen_http_str, id)
 }
 
-func transferServer(c net.Conn, listener chan io.Writer, id string, listen_http_str string) {
+func transferServer(sender net.Conn, listener chan io.Writer, id string, listen_http_str string) {
 	messageToSender := func(message string) error {
 		log.Println(id, "to Sender:", message)
-		_, err := c.Write([]byte(message + "\n"))
+		_, err := sender.Write([]byte(message + "\n"))
 		if err != nil {
 			log.Println("Write error to sender", err.Error())
 		}
 		return err
 	}
 
+	status_message := "[status] Waiting"
+
+	// Closing this channel means the end of the transfer
+	quit := make(chan struct{})
+	go func() {
+		ticker_30s := time.NewTicker(30 * time.Second)
+		defer ticker_30s.Stop()
+		for {
+			select {
+			case <-ticker_30s.C:
+				// To prevent a timeout, we send some data every 30 seconds. TCP keepalive might be enough by itself
+				// for short waits, but it might not be enough to last 90 minutes. (and it is nice to get a message
+				// to confirm that everything is fine).
+				if messageToSender(status_message) != nil {
+					close(quit)
+					return
+				}
+			case <-quit:
+				return
+			}
+		}
+	}()
+
 	defer func() {
 		// Errors will be logged. There is nothing else to do
 		messageToSender("Closing")
 
-		err := c.Close()
+		err := sender.Close()
 		if err != nil {
-			log.Println(id, "error closing", err)
+			log.Println(id, "error when closing:", err)
 		}
-		listener <- nil
+		close(listener)
+		close(quit)
 	}()
 
 	url := getURL(listen_http_str, id)
@@ -49,40 +73,37 @@ func transferServer(c net.Conn, listener chan io.Writer, id string, listen_http_
 
 	log.Println(id, "Serving", url, "- waiting for a connection")
 
-	ticker_30s := time.NewTicker(30 * time.Second)
-	ticker_90m := time.NewTicker(90 * time.Minute)
-
 	var receiver io.Writer = nil
 
+	// Waiting up to 90 minutes for a message on the listener channel. The message will
+	// contain the io.Writer used to send the HTTP response
+	ticker_90m := time.NewTicker(90 * time.Minute)
 	for receiver == nil {
 		select {
 		case receiver = <-listener:
 			break
-		case <-ticker_30s.C:
-			if messageToSender("Waiting") != nil {
-				return
-			}
 		case <-ticker_90m.C:
 			messageToSender("No receiver found, Stopping")
 			return
 		}
 	}
+	ticker_90m.Stop()
+
 	if receiver == nil {
 		messageToSender("Error on the receiver side")
 		return
 	}
 
-	ticker_30s.Stop()
-	ticker_90m.Stop()
-
 	if messageToSender("Starting transfer") != nil {
 		return
 	}
 
-	buffer := make([]byte, 4096)
+	status_message = "[status] Transferring data"
 
+	// Now stream the data from the sender to the receiver
+	buffer := make([]byte, 4096)
 	for {
-		nr, errRead := c.Read(buffer)
+		nr, errRead := sender.Read(buffer)
 		if errRead != nil && errRead != io.EOF {
 			// Errors will be logged. There is nothing else to do
 			messageToSender("Error reading data from the sender")
@@ -137,7 +158,11 @@ func sendData(mapping *SafeMap, w FlushWriter, path string) {
 	} else {
 		w.w.Header().Add("Content-type", getMimeType(path))
 		w.w.WriteHeader(http.StatusAccepted)
+		// We send the writer to the transferServer goroutine that is waiting. It will
+		// take over the channel conn.
 		conn <- w
+		// When the transfer is finished (success or error), conn will
+		// be closed
 		<-conn
 	}
 }
