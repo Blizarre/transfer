@@ -3,7 +3,7 @@
 ## Disclaimer
 **This is an experiment. It is not meant for production use.**
 
-I wanted to learn a bit about channels and coroutines, so this code is really was made just for fun. It's probably only me second go software in 5 years.
+I wanted to learn a bit about channels and coroutines, so this code was made just for fun. It's probably only my second go program in 5 years.
 
 ## Description
 
@@ -17,6 +17,11 @@ The server will only store the data long enough to transmit it.
 
 Error handling is lacking as there is no way for the server to know if the `sender` failed.
 
+You could use it to pipe the logs for some long-running program to your browser or to a file on your desktop, or to
+quickly copy a file when you are behind several layers of abstraction (like inside a container inside a VM on a remote server).
+All of that without having to install any custom software apart from a flavour of netcat.
+
+There are a lot of limitations because the protocol is so simplistic, making error handling difficult.
 
 ## Example
 
